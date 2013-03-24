@@ -1,0 +1,353 @@
+#!/bin/bash
+
+export LANG=C
+GUEST_CONF_DIR=/etc/libvirt/qemu
+GUEST_IMG_PARTITON=/dev/sda7
+VIRHSH_LIST=`mktemp`
+DOMINFO_TMP=`mktemp`
+
+function normalizeunit() {
+  if [ $2 == "b" ]; then
+    u=$((1024 * 1024 *1024))
+  elif [ $2 == "k" ]; then
+    u=$((1024 * 1024))
+  elif [ $2 == "m" ]; then
+    u=1024
+  else
+    u=$((1024 * 1024))
+  fi
+
+  gbv=$(($1 * 10 / ${u}))
+  if [ ${#gbv} -eq 1 ]; then
+    value="0.${gbv}"
+  else
+    v1=`echo ${gbv} | sed "s/^\(.*\).$/\1/"`
+    v2=`echo ${gbv} | sed "s/^.*\(.\)$/\1/"`
+    value="${v1}.${v2}"
+  fi
+
+  echo ${value}
+}
+
+function hostinfo() {
+  id=0
+  nm="Host:`hostname`"
+  status="-"
+  mcpu=`grep -c "processor" /proc/cpuinfo | awk '{print $1}'`
+  ccpu=${mcpu}
+  mmem=`grep "MemTotal:" /proc/meminfo | awk '{print $2}'`
+  cmem=${mmem}
+  dsk=`fdisk -l ${GUEST_IMG_PARTITON} 2> /dev/null | grep Disk | awk '{print $5}'`
+  echo "${id} ${nm} ${status} ${mcpu} ${ccpu} ${mmem} ${cmem} ${dsk}"
+}
+
+function dominfo_from_virshline() {
+  line=$1
+  id=`echo ${line} | awk '{print $1}'`
+  name=`echo ${line} | awk '{print $2}'`
+  status=`echo ${line} | awk '{print $3}'`
+
+  conf_file=${GUEST_CONF_DIR}/${name}.xml
+  mcpu=`grep "</vcpu>" ${conf_file} | sed "s/^.*>\(.*\)<.*$/\1/"`
+
+  virshdominfo=`virsh dominfo ${name} | egrep "CPU\(s\)|Max memory|Used memory" | cut -d":" -f2 | awk '{print $1}'`
+
+  ccpu=`echo ${virshdominfo} | awk '{print $1}'`
+  mmem_kb=`echo ${virshdominfo} | awk '{print $2}'`
+  cmem_kb=`echo ${virshdominfo} | awk '{print $3}'`
+  currentmem_kb=`grep "</currentMemory>" ${conf_file} | sed "s/^.*>\(.*\)<.*$/\1/"`
+
+  img_file=`grep "source file" ${conf_file} | sed "s/^.*source file=[\"']\(.*\)[\"'].*$/\1/"`
+  if [ -z ${img_file} ]; then
+    img_disk=`grep "source dev" ${conf_file} | sed "s/^.*source file=[\"']\(.*\)[\"'].*$/\1/"`
+    disk_b=`fdisk -l ${img_disk} 2> /dev/null | grep Disk | awk '{print $5}'`
+  else
+    disk_b=`ls -l ${img_file} | awk '{print $5}'`
+  fi
+  if [ `isnumber ${disk_b}` -eq 0 ]; then
+    disk_b=0
+  fi
+
+  echo "${id} ${name} ${status} ${mcpu} ${ccpu} ${mmem_kb} ${cmem_kb} ${disk_b}"
+}
+
+function isnumber() {
+  n=`echo $1 | egrep "^[0-9\.]+$"`
+  if [[ -n "$1" && "${n}" == "$1" ]]; then
+    echo 1
+  else
+    echo 0
+  fi
+}
+
+function sumtotal() {
+ total=`awk 'BEGIN{mc=0;c=0;mm=0;m=0;d=0}{mc+=$4;c+=$5;mm+=$6;m+=$7;d+=$8}END{print mc" "c" "mm" "m" "d}' ${DOMINFO_TMP}`
+ echo "- Guests-Total - ${total}"
+}
+
+function fmtprint1() {
+  id=$1
+  nm=$2
+  st=$3
+  mcpu="$4"
+  ccpu="$5"
+  if [ "`isnumber "$6"`" == "1" ]; then
+    mmem=`normalizeunit $6 k 2>/dev/null`
+  else
+    mmem="$6"
+  fi
+  if [ "`isnumber "$7"`" == "1" ]; then
+    cmem=`normalizeunit "$7" k 2>/dev/null`
+  else
+    cmem="$7"
+  fi
+  if [ "`isnumber "$8"`" == 1 ]; then
+    dsk=`normalizeunit "$8" b 2>/dev/null`
+  else
+    dsk="$8"
+  fi
+  printf %+3s" "%-30s%-10s%+10s%+10s%+14s%+14s%+16s\\n "${id}" "${nm}" "${st}" "${mcpu}" "${ccpu}" "${mmem}" "${cmem}" "${dsk}"
+}
+
+function list () {
+  if [ $1 == 0 ]; then
+    virsh list | egrep -v "^ Id|^--|^$" > ${VIRHSH_LIST}
+  else
+    virsh list --all | egrep -v "^ Id|^--|^$" > ${VIRHSH_LIST}
+  fi
+
+  if [ $1 == 2 ]; then
+    if [ ! -d ${GUEST_CONF_DIR}/autostart ]; then
+      autostart_hosts=""
+    else
+      autostart_hosts=" `ls ${GUEST_CONF_DIR}/autostart | sed "s/.xml//g"` "
+    fi
+  fi
+
+  echo
+  fmtprint1 ID DomainName Status MaxCPU CPU MaxMemory Memory Disk
+  while read line; do
+    dominfo=( `dominfo_from_virshline "${line}"` )
+    if [ $1 == 2 ]; then
+      if [ -z "`echo "${autostart_hosts}" | grep " ${dominfo[1]} "`" ]; then
+        continue
+      fi
+    fi
+    echo ${dominfo[@]} >> ${DOMINFO_TMP}
+    fmtprint1 ${dominfo[@]}
+  done < ${VIRHSH_LIST}
+  fmtprint1 "---" "---" "---" "---" "---" "---" "---" "---"
+  fmtprint1 `sumtotal`
+  fmtprint1 `hostinfo`
+  echo
+}
+
+function finish() {
+  rm ${VIRHSH_LIST} ${DOMINFO_TMP} 2> /dev/null
+  exit $1
+}
+
+function confirm() {
+  while [ 1 ]; do
+    echo
+    echo "CAUTION!"
+    echo $1
+    read INPUT
+    if [ ${INPUT} == "y" ]; then
+      break
+    elif [ ${INPUT} == "n" ]; then
+      echo "Canceled."
+      finish 0
+    fi
+  done
+}
+
+echo
+if [ "$1" == "list" ]; then
+  if [ "$2" == "--all" ]; then
+    echo "Current Virtual Machine Status including shut domain:"
+    list 1
+  elif [ "$2" == "--autostart" ]; then
+    echo "Auto-Start Setting Status:"
+    list 2
+  else
+    echo "Running Virtual Machine Status:"
+    list 0
+  fi
+
+elif [ "$1" == "setvcpus" ]; then
+  if [ $# -ne 3 ]; then
+    echo "Usage: safevirsh setvcpus id_or_domain-name cpunum"
+    finish 1
+  fi
+  if [ "`isnumber $3`" == "0" ]; then
+    echo "Usage: safevirsh setvcpus id_or_domain-name cpunum"
+    finish 1
+  fi
+
+  echo "Running Virtual Machine Status:"
+  list 0
+
+  domline="`grep " $2 " ${VIRHSH_LIST}`"
+  if [ "${domline}" == "" ]; then
+    echo "Error: Unknown domain $2."
+    finish 1
+  fi
+  dominfo=( $(dominfo_from_virshline "${domline}") )
+  hinfo=( `hostinfo` )
+  total=( `sumtotal` )
+  tncpu=$((${total[4]} + $3 - ${dominfo[4]}))
+  echo "New VCPU Setting:"
+  fmtprint1 ID DomainName Status MaxCPU CPU MaxMemory Memory Disk
+  fmtprint1 ${dominfo[0]} ${dominfo[1]} ${dominfo[2]} ${dominfo[3]} "${dominfo[4]} -> $3" ${dominfo[5]} ${dominfo[6]} ${dominfo[7]}
+  fmtprint1 "---" "---" "---" "---" "---" "---" "---" "---"
+  fmtprint1 ${total[0]} ${total[1]} ${total[2]} ${total[3]} "${total[4]} -> ${tncpu}" ${total[5]} ${total[6]} ${total[7]}
+  fmtprint1 ${hinfo[@]}
+  if [ ${tncpu} -gt ${hinfo[4]} ]; then
+    confirm "You're over-commiting VCPUs to runnging guest VMs. Continue? y/n"
+  fi
+
+  virsh setvcpus $2 $3
+
+elif [ "$1" == "setmem" ]; then
+  if [ $# -ne 3 ]; then
+    echo "Usage: safevirsh setmem id_or_domain-name memoryGB"
+    finish 1
+  fi
+  if [ "`isnumber $3`" == "0" ]; then
+    echo "Usage: safevirsh setmem id_or_domain-name memoryGB"
+    finish 1
+  fi
+  echo "Running Virtual Machine Status:"
+  list 0
+
+  domline="`grep " $2 " ${VIRHSH_LIST}`"
+  if [ "${domline}" == "" ]; then
+    echo "Error: Unknown domain $2."
+    finish 1
+  fi
+  dominfo=( $(dominfo_from_virshline "${domline}") )
+  hinfo=( `hostinfo` )
+  total=( `sumtotal` )
+
+  dnmemkb=`echo $3 | awk '{print $0 * 1024 * 1024}'`
+  tnmemkb=$((${total[6]} + ${dnmemkb} - ${dominfo[6]}))
+  echo "New MEMORY Setting:"
+  dmc="`normalizeunit ${dominfo[6]} k` -> $3"
+  fmtprint1 ID DomainName Status MaxCPU CPU MaxMemory Memory Disk
+  fmtprint1 ${dominfo[0]} ${dominfo[1]} ${dominfo[2]} ${dominfo[3]} ${dominfo[4]} ${dominfo[5]} "${dmc}" ${dominfo[7]}
+  fmtprint1 "---" "---" "---" "---" "---" "---" "---" "---"
+  tmc="`normalizeunit ${total[6]} k` -> `normalizeunit ${tnmemkb} k`"
+  fmtprint1 ${total[0]} ${total[1]} ${total[2]} ${total[3]} ${total[4]} ${total[5]} "${tmc}" ${total[7]}
+  fmtprint1 ${hinfo[@]}
+  if [ ${tnmemkb} -gt ${hinfo[6]} ]; then
+    confirm "You're over-commiting MEMORY to runnging guest VMs. Continue? y/n"
+  fi
+
+  virsh setmem $2 ${dnmemkb}
+
+elif [ "$1" == "start" ]; then
+  if [ $# -ne 2 ]; then
+    echo "Usage: safevirsh start domain-name"
+    finish 1
+  fi
+  echo "Running Virtual Machine Status:"
+  list 0
+
+  hinfo=( `hostinfo` )
+  total=( `sumtotal` )
+
+  virsh list --all | egrep -v "^ Id|^--|^$" > ${VIRHSH_LIST}
+  domline="`grep " $2 " ${VIRHSH_LIST}`"
+  if [ "${domline}" == "" ]; then
+    echo "Error: Unknown domain $2."
+    finish 1
+  fi
+  dominfo=( $(dominfo_from_virshline "${domline}") )
+
+  tncpu=$((${total[4]} + ${dominfo[4]}))
+  tnmemkb=$((${total[6]} + ${dominfo[6]}))
+  tmc="${total[3]} -> $((${total[3]} + ${dominfo[3]}))"
+  tcc="${total[4]} -> ${tncpu}"
+  tmm="`normalizeunit ${total[5]} k` -> `normalizeunit $((${total[5]} + ${dominfo[5]})) k`"
+  tcm="`normalizeunit ${total[6]} k` -> `normalizeunit ${tnmemkb} k`"
+  td="`normalizeunit ${total[7]} b` -> `normalizeunit $((${total[7]}+${dominfo[7]})) b`"
+  echo "Starting Virtual Machine:"
+  fmtprint1 ID DomainName Status MaxCPU CPU MaxMemory Memory Disk
+  fmtprint1 ${dominfo[@]}
+  fmtprint1 "---" "---" "---" "---" "---" "---" "---" "---"
+  fmtprint1 ${total[0]} ${total[1]} ${total[2]} "${tmc}" "${tcc}" "${tmm}" "${tcm}" "${td}"
+  fmtprint1 ${hinfo[@]}
+
+  if [[ ${tnmemkb} -gt ${hinfo[6]} || ${tncpu} -gt ${hinfo[4]} ]]; then
+    confirm "You're over-commiting resource to runnging guest VMs. Continue? y/n"
+  fi
+  virsh start $2
+
+elif [ "$1" == "autostart" ]; then
+  if [ $# -eq 2 ]; then
+    guest=$2
+  else
+    echo "Usage: safevirsh autostart domain-name"
+    finish 1
+  fi
+  
+  echo "Auto-Start Setting Status:"
+  list 2
+
+  hinfo=( `hostinfo` )
+  total=( `sumtotal` )
+
+  virsh list --all | egrep -v "^ Id|^--|^$" > ${VIRHSH_LIST}
+  domline="`grep " ${guest} " ${VIRHSH_LIST}`"
+  if [ "${domline}" == "" ]; then
+    echo "Error: Unknown domain ${guest}."
+    finish 1
+  fi
+  dominfo=( $(dominfo_from_virshline "${domline}") )
+
+  tncpu=$((${total[4]} + ${dominfo[4]}))
+  tnmemkb=$((${total[6]} + ${dominfo[6]}))
+  tmc="${total[3]} -> $((${total[3]} + ${dominfo[3]}))"
+  tcc="${total[4]} -> ${tncpu}"
+  tmm="`normalizeunit ${total[5]} k` -> `normalizeunit $((${total[5]} + ${dominfo[5]})) k`"
+  tcm="`normalizeunit ${total[6]} k` -> `normalizeunit ${tnmemkb} k`"
+  td="`normalizeunit ${total[7]} b` -> `normalizeunit $((${total[7]}+${dominfo[7]})) b`"
+  if [ -n "${option}" ]; then
+    echo "Set Virtual Machine NOT to auto-start:"
+  else
+    echo "Set Virtual Machine to auto-start:"
+  fi
+  fmtprint1 ID DomainName Status MaxCPU CPU MaxMemory Memory Disk
+  fmtprint1 ${dominfo[@]}
+  fmtprint1 "---" "---" "---" "---" "---" "---" "---" "---"
+  fmtprint1 ${total[0]} ${total[1]} ${total[2]} "${tmc}" "${tcc}" "${tmm}" "${tcm}" "${td}"
+  fmtprint1 ${hinfo[@]}
+
+  if [[ ${tnmemkb} -gt ${hinfo[6]} || ${tncpu} -gt ${hinfo[4]} ]]; then
+    confirm "You're over-commiting resource to auto-start guest VMs. Continue? y/n"
+  fi
+  virsh autostart ${guest}
+
+else
+  echo "
+Acceptable Commands:
+  list
+    -> List running VMs with commited resource.
+  list --all
+    -> List all VMs including shut domain with commited resource.
+  list --autostart
+    -> List VMs in auto-start list with commited resource.
+  setvcpus id_or_domain-name cpunum
+    -> Set domain's VCPU to cpunum.
+  setmem id_or_domain_name memoryGB
+    -> Set domain's memory to cpunum.
+  start domain-name
+    -> Start domain.
+  autostart domain-name
+    -> Mark domain as autostart.
+"
+
+fi
+
+finish 0
