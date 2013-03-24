@@ -1,5 +1,6 @@
 This is a wrapper for virsh command.
 Managing kvm virtual machine through safevirsh can prevent unintended over-commit of resource.
+safevirsh works only for kvm, not for Xen.
 
 Edit following setting before use.
 GUEST_CONF_DIR: Path where VM setting XML files are.
@@ -20,4 +21,3 @@ Acceptable Commands:
     -> Start domain.
   autostart domain-name
     -> Mark domain as autostart.
-
