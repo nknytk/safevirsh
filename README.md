@@ -7,17 +7,17 @@ GUEST_CONF_DIR: Path where VM setting XML files are.
 GUEST_IMG_PARTITON: Path where VM images are.
 
 Acceptable Commands:
-  list
+*  list
     -> List running VMs with commited resource.
-  list --all
+*  list --all
     -> List all VMs including shut domain with commited resource.
-  list --autostart
+*  list --autostart
     -> List VMs in auto-start list with commited resource.
-  setvcpus id_or_domain-name cpunum
+*  setvcpus id_or_domain-name cpunum
     -> Set domain's VCPU to cpunum.
-  setmem id_or_domain_name memoryGB
-    -> Set domain's memory to cpunum.
-  start domain-name
+*  setmem id_or_domain_name memoryGB
+    -> Set domain's memory to memoryGB.
+*  start domain-name
     -> Start domain.
-  autostart domain-name
+*  autostart domain-name
     -> Mark domain as autostart.
