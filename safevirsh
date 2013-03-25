@@ -58,8 +58,8 @@ function dominfo_from_virshline() {
   currentmem_kb=`grep "</currentMemory>" ${conf_file} | sed "s/^.*>\(.*\)<.*$/\1/"`
 
   img_file=`grep "source file" ${conf_file} | sed "s/^.*source file=[\"']\(.*\)[\"'].*$/\1/"`
-  if [ -z ${img_file} ]; then
-    img_disk=`grep "source dev" ${conf_file} | sed "s/^.*source file=[\"']\(.*\)[\"'].*$/\1/"`
+  if [ -z "${img_file}" ]; then
+    img_disk=`grep "source dev" ${conf_file} | sed "s/^.*source dev=[\"']\(.*\)[\"'].*$/\1/"`
     disk_b=`fdisk -l ${img_disk} 2> /dev/null | grep Disk | awk '{print $5}'`
   else
     disk_b=`ls -l ${img_file} | awk '{print $5}'`
